@@ -1,0 +1,844 @@
+!nvcc --version
+!pip install git+https://github.com/afnan47/cuda.git
+%load_ext nvcc_plugin
+
+%%writefile add.cu
+#include <iostream>
+#include <cuda_runtime.h>
+#include <cstdlib>
+
+using namespace std;
+
+__global__ void add(int* A, int* B, int* C, int size) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid < size) {
+        C[tid] = A[tid] + B[tid];
+    }
+}
+
+int main() {
+    int N;
+    cout << "Enter the size of the vectors: ";
+    cin >> N;
+
+    int* A, * B, * C;
+    size_t vectorBytes = N * sizeof(int);
+
+    A = new int[N];
+    B = new int[N];
+    C = new int[N];
+
+    for (int i = 0; i < N; i++) {
+        A[i] = rand() % 10;
+        B[i] = rand() % 10;
+    }
+
+    int* X, * Y, * Z;
+    cudaMalloc(&X, vectorBytes);
+    cudaMalloc(&Y, vectorBytes);
+    cudaMalloc(&Z, vectorBytes);
+
+    cudaMemcpy(X, A, vectorBytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(Y, B, vectorBytes, cudaMemcpyHostToDevice);
+
+    add<<<1, N>>>(X, Y, Z, N);
+
+    cudaMemcpy(C, Z, vectorBytes, cudaMemcpyDeviceToHost);
+
+    cout << "Vector A:";
+    for (int i = 0; i < N; i++) {
+        cout << " " << A[i];
+    }
+    cout << endl;
+
+    cout << "Vector B:";
+    for (int i = 0; i < N; i++) {
+        cout << " " << B[i];
+    }
+    cout << endl;
+
+    cout << "Addition:";
+    for (int i = 0; i < N; i++) {
+        cout << " " << C[i];
+    }
+    cout << endl;
+
+    delete[] A;
+    delete[] B;
+    delete[] C;
+
+    cudaFree(X);
+    cudaFree(Y);
+    cudaFree(Z);
+
+    return 0;
+}
+
+
+---------------
+
+!nvcc add.cu -o add
+!./add
+
+%%writefile matrix_multi.cu
+#include <iostream>
+#include <cuda_runtime.h>
+
+using namespace std;
+
+const int N = 4;
+
+__global__ void matrixMultiply(int* A, int* B, int* C) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (row < N && col < N) {
+        int sum = 0;
+        for (int i = 0; i < N; ++i) {
+            sum += A[row * N + i] * B[i * N + col];
+        }
+        C[row * N + col] = sum;
+    }
+}
+
+int main() {
+    int* A, * B, * C;
+    size_t matrixBytes = N * N * sizeof(int);
+
+    A = new int[N * N];
+    B = new int[N * N];
+    C = new int[N * N];
+
+    auto input = [&](int* matrix) {
+        cout << "Enter elements of Matrix (" << N << "x" << N << "):" << endl;
+        for (int i = 0; i < N * N; ++i) cin >> matrix[i];
+    };
+
+    input(A);
+    input(B);
+
+    int* X, * Y, * Z;
+    cudaMalloc(&X, matrixBytes);
+    cudaMalloc(&Y, matrixBytes);
+    cudaMalloc(&Z, matrixBytes);
+
+    cudaMemcpy(X, A, matrixBytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(Y, B, matrixBytes, cudaMemcpyHostToDevice);
+
+    matrixMultiply<<<1, dim3(N, N)>>>(X, Y, Z);
+
+    cudaMemcpy(C, Z, matrixBytes, cudaMemcpyDeviceToHost);
+
+    cout << "Output- Matrix size: " << N << "x" << N << endl;
+    cout << "Input Matrix 1:" << endl;
+    for (int i = 0; i < N; ++i) {
+        for (int j = 0; j < N; ++j) cout << A[i * N + j] << " ";
+        cout << endl;
+    }
+
+    cout << "Input Matrix 2:" << endl;
+    for (int i = 0; i < N; ++i) {
+        for (int j = 0; j < N; ++j) cout << B[i * N + j] << " ";
+        cout << endl;
+    }
+
+    cout << "Resultant matrix:" << endl;
+    for (int i = 0; i < N; ++i) {
+        for (int j = 0; j < N; ++j) cout << C[i * N + j] << " ";
+        cout << endl;
+    }
+
+    cout << "Finished." << endl;
+
+    delete[] A;
+    delete[] B;
+    delete[] C;
+
+    cudaFree(X);
+    cudaFree(Y);
+    cudaFree(Z);
+
+    return 0;
+}
+
+---------
+
+!nvcc matrix_multi.cu -o matrix_multi
+!./matrix_multi
+
+%%writefile smma.cu
+#include <iostream>
+#include <vector>
+#include <climits>
+
+__global__ void min_reduction_kernel(int* arr, int size, int* result) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid < size) {
+        atomicMin(result, arr[tid]);
+    }
+}
+
+__global__ void max_reduction_kernel(int* arr, int size, int* result) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid < size) {
+        atomicMax(result, arr[tid]);
+    }
+}
+
+__global__ void sum_reduction_kernel(int* arr, int size, int* result) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid < size) {
+        atomicAdd(result, arr[tid]);
+    }
+}
+
+int main() {
+    int size;
+    std::cout << "Enter the number of elements: ";
+    std::cin >> size;
+
+    std::vector<int> arr(size);
+    std::cout << "Enter the elements:" << std::endl;
+    for (int i = 0; i < size; ++i) {
+        std::cin >> arr[i];
+    }
+
+    int* d_arr;
+    int* d_result_min, * d_result_max, * d_result_sum;
+    int result_min = INT_MAX, result_max = INT_MIN, result_sum = 0;
+
+    cudaMalloc(&d_arr, size * sizeof(int));
+    cudaMemcpy(d_arr, arr.data(), size * sizeof(int), cudaMemcpyHostToDevice);
+
+    cudaMalloc(&d_result_min, sizeof(int));
+    cudaMalloc(&d_result_max, sizeof(int));
+    cudaMalloc(&d_result_sum, sizeof(int));
+
+    cudaMemcpy(d_result_min, &result_min, sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_result_max, &result_max, sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_result_sum, &result_sum, sizeof(int), cudaMemcpyHostToDevice);
+
+    min_reduction_kernel<<<(size + 255) / 256, 256>>>(d_arr, size, d_result_min);
+    max_reduction_kernel<<<(size + 255) / 256, 256>>>(d_arr, size, d_result_max);
+    sum_reduction_kernel<<<(size + 255) / 256, 256>>>(d_arr, size, d_result_sum);
+
+    cudaMemcpy(&result_min, d_result_min, sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&result_max, d_result_max, sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&result_sum, d_result_sum, sizeof(int), cudaMemcpyDeviceToHost);
+
+    std::cout << "Minimum value: " << result_min << std::endl;
+    std::cout << "Maximum value: " << result_max << std::endl;
+    std::cout << "Sum: " << result_sum << std::endl;
+    std::cout << "Average: " << static_cast<double>(result_sum) / size << std::endl;
+
+    cudaFree(d_arr);
+    cudaFree(d_result_min);
+    cudaFree(d_result_max);
+    cudaFree(d_result_sum);
+
+    return 0;
+}
+
+--------------
+
+!nvcc smma.cu -o smma
+!./smma
+
+%%writefile bfsdfs.cu
+#include <iostream>
+#include <vector>
+#include <queue>
+#include <stack>
+
+__global__ void bfs_kernel(int* adjList, int* visited, int* queue, int* queueSize, int n) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid < *queueSize) {
+        int u = queue[tid];
+        if (!visited[u]) {
+            visited[u] = 1;
+            for (int i = adjList[u]; i < adjList[u + 1]; ++i) {
+                int v = adjList[i];
+                if (!visited[v]) {
+                    int idx = atomicAdd(queueSize, 1);
+                    queue[idx] = v;
+                }
+            }
+        }
+    }
+}
+
+__global__ void dfs_kernel(int* adjList, int* visited, int* stack, int* stackSize, int n) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid < *stackSize) {
+        int u = stack[tid];
+        if (!visited[u]) {
+            visited[u] = 1;
+            for (int i = adjList[u]; i < adjList[u + 1]; ++i) {
+                int v = adjList[i];
+                if (!visited[v]) {
+                    int idx = atomicAdd(stackSize, 1);
+                    stack[idx] = v;
+                }
+            }
+        }
+    }
+}
+
+int main() {
+    int n, m;
+    std::cout << "Enter the number of vertices: ";
+    std::cin >> n;
+    std::cout << "Enter the number of edges: ";
+    std::cin >> m;
+
+    // Assuming graph is represented as an adjacency list
+    std::vector<std::vector<int>> adjList(n + 1);
+    std::cout << "Enter the edges (format: u v):\n";
+    for (int i = 0; i < m; ++i) {
+        int u, v;
+        std::cin >> u >> v;
+        adjList[u].push_back(v);
+        adjList[v].push_back(u); // Assuming an undirected graph
+    }
+
+    // Allocate memory on the GPU
+    int* d_adjList, * d_visited, * d_queue, * d_queueSize, * d_stack, * d_stackSize;
+    cudaMalloc(&d_adjList, (2 * m) * sizeof(int)); // Each edge is stored twice in the adjacency list
+    cudaMalloc(&d_visited, n * sizeof(int));
+    cudaMalloc(&d_queue, n * sizeof(int));
+    cudaMalloc(&d_queueSize, sizeof(int));
+    cudaMalloc(&d_stack, n * sizeof(int));
+    cudaMalloc(&d_stackSize, sizeof(int));
+
+    // Initialize data on the GPU
+
+    // Perform BFS traversal
+    int start;
+    std::cout << "Enter the starting vertex for BFS: ";
+    std::cin >> start;
+    cudaMemcpy(d_queue, &start, sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_queueSize, &start, sizeof(int), cudaMemcpyHostToDevice);
+    int queueSize = 1;
+    while (queueSize > 0) {
+        bfs_kernel<<<(queueSize + 255) / 256, 256>>>(d_adjList, d_visited, d_queue, d_queueSize, n);
+        cudaMemcpy(&queueSize, d_queueSize, sizeof(int), cudaMemcpyDeviceToHost);
+    }
+
+    // Perform DFS traversal
+    std::cout << "Enter the starting vertex for DFS: ";
+    std::cin >> start;
+    cudaMemcpy(d_visited, &start, sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_stack, &start, sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_stackSize, &start, sizeof(int), cudaMemcpyHostToDevice);
+    int stackSize = 1;
+    while (stackSize > 0) {
+        dfs_kernel<<<(stackSize + 255) / 256, 256>>>(d_adjList, d_visited, d_stack, d_stackSize, n);
+        cudaMemcpy(&stackSize, d_stackSize, sizeof(int), cudaMemcpyDeviceToHost);
+    }
+
+    // Copy visited array back to host
+    int* h_visited = new int[n];
+    cudaMemcpy(h_visited, d_visited, n * sizeof(int), cudaMemcpyDeviceToHost);
+
+    // Print BFS traversal result
+    std::cout << "BFS traversal starting from vertex " << start << ":\n";
+    for (int i = 0; i < n; ++i) {
+        if (h_visited[i]) {
+            std::cout << i << " ";
+        }
+    }
+    std::cout << std::endl;
+
+    // Print DFS traversal result
+    std::cout << "DFS traversal starting from vertex " << start << ":\n";
+    for (int i = 0; i < n; ++i) {
+        if (h_visited[i]) {
+            std::cout << i << " ";
+        }
+    }
+    std::cout << std::endl;
+
+    delete[] h_visited;
+
+    // Free memory on the GPU
+    cudaFree(d_adjList);
+    cudaFree(d_visited);
+    cudaFree(d_queue);
+    cudaFree(d_queueSize);
+    cudaFree(d_stack);
+    cudaFree(d_stackSize);
+
+    return 0;
+}
+
+
+!nvcc bfsdfs.cu -o bfsdfs
+!./bfsdfs
+
+%%writefile bubblesort.cu
+#include <iostream>
+#include <vector>
+#include <chrono>
+
+__global__ void bubbleSortParallel(int* arr, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n - 1) {
+        if (arr[idx] > arr[idx + 1]) {
+            int temp = arr[idx];
+            arr[idx] = arr[idx + 1];
+            arr[idx + 1] = temp;
+        }
+    }
+}
+
+void bubbleSortSerial(std::vector<int>& arr) {
+    int n = arr.size();
+    bool swapped = true;
+    while (swapped) {
+        swapped = false;
+        for (int i = 0; i < n - 1; i++) {
+            if (arr[i] > arr[i + 1]) {
+                std::swap(arr[i], arr[i + 1]);
+                swapped = true;
+            }
+        }
+    }
+}
+
+int main() {
+    int n = 10000;
+    int block_size = 256;
+    int num_blocks = (n + block_size - 1) / block_size;
+
+    std::vector<int> arr(n);
+
+    // Initialize array with random values
+    for (int i = 0; i < n; i++) {
+        arr[i] = rand() % 10000;
+    }
+
+    // Measure serial Bubble Sort performance
+    auto start = std::chrono::high_resolution_clock::now();
+    bubbleSortSerial(arr);
+    auto stop = std::chrono::high_resolution_clock::now();
+    auto durationSerial = std::chrono::duration_cast<std::chrono::milliseconds>(stop - start);
+
+    std::cout << "Serial Bubble Sort took " << durationSerial.count() << " milliseconds." << std::endl;
+
+    // Reset array for parallel sort
+    for (int i = 0; i < n; i++) {
+        arr[i] = rand() % 10000;
+    }
+
+    int* d_arr;
+    cudaMalloc(&d_arr, n * sizeof(int));
+    cudaMemcpy(d_arr, arr.data(), n * sizeof(int), cudaMemcpyHostToDevice);
+
+    // Measure parallel Bubble Sort performance
+    start = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i < n; i++) {
+        bubbleSortParallel<<<num_blocks, block_size>>>(d_arr, n);
+        cudaDeviceSynchronize();
+    }
+    stop = std::chrono::high_resolution_clock::now();
+    auto durationParallel = std::chrono::duration_cast<std::chrono::milliseconds>(stop - start);
+
+    std::cout << "Parallel Bubble Sort took " << durationParallel.count() << " milliseconds." << std::endl;
+
+    cudaMemcpy(arr.data(), d_arr, n * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaFree(d_arr);
+
+    return 0;
+}
+
+
+------------
+
+!nvcc bubblesort.cu -o bubblesort
+!./bubblesort
+
+%%writefile mergesort.cu
+#include <iostream>
+#include <vector>
+#include <chrono>
+
+#define BLOCK_SIZE 256
+
+// Serial merge sort implementation
+void merge(int* arr, int l, int m, int r) {
+    int n1 = m - l + 1;
+    int n2 = r - m;
+
+    // Create temporary arrays
+    int L[n1], R[n2];
+
+    // Copy data to temporary arrays L[] and R[]
+    for (int i = 0; i < n1; i++)
+        L[i] = arr[l + i];
+    for (int j = 0; j < n2; j++)
+        R[j] = arr[m + 1 + j];
+
+    // Merge the temporary arrays back into arr[l..r]
+    int i = 0; // Initial index of first subarray
+    int j = 0; // Initial index of second subarray
+    int k = l; // Initial index of merged subarray
+    while (i < n1 && j < n2) {
+        if (L[i] <= R[j]) {
+            arr[k] = L[i];
+            i++;
+        } else {
+            arr[k] = R[j];
+            j++;
+        }
+        k++;
+    }
+
+    // Copy the remaining elements of L[], if any
+    while (i < n1) {
+        arr[k] = L[i];
+        i++;
+        k++;
+    }
+
+    // Copy the remaining elements of R[], if any
+    while (j < n2) {
+        arr[k] = R[j];
+        j++;
+        k++;
+    }
+}
+
+void mergeSort(int* arr, int l, int r) {
+    if (l < r) {
+        int m = l + (r - l) / 2;
+        mergeSort(arr, l, m);
+        mergeSort(arr, m + 1, r);
+        merge(arr, l, m, r);
+    }
+}
+
+// Parallel merge sort kernel
+__global__ void mergeSortKernel(int* arr, int* temp, int size, int width) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int start = idx * width * 2;
+
+    if (start < size) {
+        int end = min(start + width * 2, size);
+        int mid = start + width;
+        int i = start;
+        int j = mid;
+        int k = start;
+
+        while (i < mid && j < end) {
+            if (arr[i] <= arr[j]) {
+                temp[k] = arr[i];
+                i++;
+            } else {
+                temp[k] = arr[j];
+                j++;
+            }
+            k++;
+        }
+
+        while (i < mid) {
+            temp[k] = arr[i];
+            i++;
+            k++;
+        }
+
+        while (j < end) {
+            temp[k] = arr[j];
+            j++;
+            k++;
+        }
+
+        // Copy merged values back to original array
+        for (int i = start; i < end; i++) {
+            arr[i] = temp[i];
+        }
+    }
+}
+
+void mergeSortParallel(int* arr, int size) {
+    int* temp;
+    cudaMalloc(&temp, size * sizeof(int));
+    cudaMemcpy(temp, arr, size * sizeof(int), cudaMemcpyDeviceToDevice);
+
+    for (int width = 1; width < size; width *= 2) {
+        int num_blocks = (size + (2 * width) - 1) / (2 * width);
+        mergeSortKernel<<<num_blocks, BLOCK_SIZE>>>(arr, temp, size, width);
+        cudaDeviceSynchronize();
+    }
+
+    cudaFree(temp);
+}
+
+int main() {
+    int n = 10000;
+    std::vector<int> arr_serial(n);
+    std::vector<int> arr_parallel(n);
+
+    // Initialize arrays with random values
+    for (int i = 0; i < n; ++i) {
+        arr_serial[i] = rand() % 1000; // Generating random numbers between 0 and 999
+        arr_parallel[i] = arr_serial[i];
+    }
+
+    // Serial merge sort
+    auto start_serial = std::chrono::high_resolution_clock::now();
+    mergeSort(arr_serial.data(), 0, n - 1);
+    auto end_serial = std::chrono::high_resolution_clock::now();
+
+    // Parallel merge sort
+    auto start_parallel = std::chrono::high_resolution_clock::now();
+    mergeSortParallel(arr_parallel.data(), n);
+    cudaDeviceSynchronize();
+    auto end_parallel = std::chrono::high_resolution_clock::now();
+
+    // Print timing information
+    std::chrono::duration<double, std::milli> duration_serial = end_serial - start_serial;
+    std::cout << "Serial Merge Sort took " << duration_serial.count() << " milliseconds." << std::endl;
+
+    std::chrono::duration<double, std::milli> duration_parallel = end_parallel - start_parallel;
+    std::cout << "Parallel Merge Sort took " << duration_parallel.count() << " milliseconds." << std::endl;
+
+    return 0;
+}
+
+
+------------
+
+!nvcc mergesort.cu -o mergesort
+!./mergesort
+
+%%writefile mergesort1.cu
+#include <iostream>
+#include <vector>
+#include <chrono>
+
+#define BLOCK_SIZE 256
+
+// Serial merge sort implementation
+void merge(int* arr, int l, int m, int r) {
+    int n1 = m - l + 1;
+    int n2 = r - m;
+
+    // Create temporary arrays
+    int L[n1], R[n2];
+
+    // Copy data to temporary arrays L[] and R[]
+    for (int i = 0; i < n1; i++)
+        L[i] = arr[l + i];
+    for (int j = 0; j < n2; j++)
+        R[j] = arr[m + 1 + j];
+
+    // Merge the temporary arrays back into arr[l..r]
+    int i = 0; // Initial index of first subarray
+    int j = 0; // Initial index of second subarray
+    int k = l; // Initial index of merged subarray
+    while (i < n1 && j < n2) {
+        if (L[i] <= R[j]) {
+            arr[k] = L[i];
+            i++;
+        } else {
+            arr[k] = R[j];
+            j++;
+        }
+        k++;
+    }
+
+    // Copy the remaining elements of L[], if any
+    while (i < n1) {
+        arr[k] = L[i];
+        i++;
+        k++;
+    }
+
+    // Copy the remaining elements of R[], if any
+    while (j < n2) {
+        arr[k] = R[j];
+        j++;
+        k++;
+    }
+}
+
+void mergeSort(int* arr, int l, int r) {
+    if (l < r) {
+        int m = l + (r - l) / 2;
+        mergeSort(arr, l, m);
+        mergeSort(arr, m + 1, r);
+        merge(arr, l, m, r);
+    }
+}
+
+// Parallel merge sort kernel
+__global__ void mergeSortKernel(int* arr, int* temp, int size, int width) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int start = idx * width * 2;
+
+    if (start < size) {
+        int end = min(start + width * 2, size);
+        int mid = start + width;
+        int i = start;
+        int j = mid;
+        int k = start;
+
+        while (i < mid && j < end) {
+            if (arr[i] <= arr[j]) {
+                temp[k] = arr[i];
+                i++;
+            } else {
+                temp[k] = arr[j];
+                j++;
+            }
+            k++;
+        }
+
+        while (i < mid) {
+            temp[k] = arr[i];
+            i++;
+            k++;
+        }
+
+        while (j < end) {
+            temp[k] = arr[j];
+            j++;
+            k++;
+        }
+    }
+}
+
+void mergeSortParallel(int* arr, int size) {
+    int* temp;
+    cudaMalloc(&temp, size * sizeof(int));
+    cudaMemcpy(temp, arr, size * sizeof(int), cudaMemcpyDeviceToDevice);
+
+    for (int width = 1; width < size; width *= 2) {
+        int num_blocks = (size + (2 * width) - 1) / (2 * width);
+        mergeSortKernel<<<num_blocks, BLOCK_SIZE>>>(arr, temp, size, width);
+        cudaDeviceSynchronize();
+        cudaMemcpy(arr, temp, size * sizeof(int), cudaMemcpyDeviceToDevice); // Copy merged array back
+    }
+
+    cudaFree(temp);
+}
+
+int main() {
+    int n = 1000;
+    std::vector<int> arr_serial(n);
+    std::vector<int> arr_parallel(n);
+
+    // Initialize arrays with random values
+    for (int i = 0; i < n; ++i) {
+        arr_serial[i] = rand() % 1000; // Generating random numbers between 0 and 999
+        arr_parallel[i] = arr_serial[i];
+    }
+
+    // Serial merge sort
+    auto start_serial = std::chrono::high_resolution_clock::now();
+    mergeSort(arr_serial.data(), 0, n - 1);
+    auto end_serial = std::chrono::high_resolution_clock::now();
+
+    // Parallel merge sort
+    auto start_parallel = std::chrono::high_resolution_clock::now();
+    mergeSortParallel(arr_parallel.data(), n);
+    cudaDeviceSynchronize();
+    auto end_parallel = std::chrono::high_resolution_clock::now();
+
+    // Print timing information
+    std::chrono::duration<double, std::milli> duration_serial = end_serial - start_serial;
+    std::cout << "Serial Merge Sort took " << duration_serial.count() << " milliseconds." << std::endl;
+
+    std::chrono::duration<double, std::milli> duration_parallel = end_parallel - start_parallel;
+    std::cout << "Parallel Merge Sort took " << duration_parallel.count() << " milliseconds." << std::endl;
+
+    return 0;
+}
+
+
+--------------------------
+
+
+
+!nvcc mergesort1.cu -o mergesort1
+!./mergesort1
+
+%%writefile mergenew.cu
+
+#include <iostream>
+#include <thrust/device_vector.h>
+#include <thrust/host_vector.h>
+#include <thrust/merge.h>
+#include <thrust/sort.h>
+#include <chrono>
+
+// Merge kernel to perform merging of two sorted arrays on the GPU
+__global__ void merge(int* input1, int* input2, int* output, int size1, int size2) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx < size1 + size2) {
+        if (idx < size1) {
+            output[idx] = input1[idx];
+        } else {
+            output[idx] = input2[idx - size1];
+        }
+    }
+}
+
+// Recursive function to perform merge sort using CUDA Thrust
+void mergeSort(thrust::device_vector<int>& data) {
+    if (data.size() <= 1) return;
+
+    int mid = data.size() / 2;
+
+    // Split the data into two halves
+    thrust::device_vector<int> left(data.begin(), data.begin() + mid);
+    thrust::device_vector<int> right(data.begin() + mid, data.end());
+
+    // Recursively sort each half
+    mergeSort(left);
+    mergeSort(right);
+
+    // Merge the sorted halves
+    thrust::device_vector<int> merged(data.size());
+    merge<<<(data.size() + 255) / 256, 256>>>(thrust::raw_pointer_cast(left.data()),
+                                               thrust::raw_pointer_cast(right.data()),
+                                               thrust::raw_pointer_cast(merged.data()),
+                                               left.size(), right.size());
+    cudaDeviceSynchronize();
+
+    // Copy the merged data back to the original vector
+    data = merged;
+}
+
+int main() {
+    // Generate random input data
+    int n = 10000;
+    thrust::host_vector<int> h_data(n);
+    for (int i = 0; i < n; ++i) {
+        h_data[i] = rand() % 10000;
+    }
+
+    // Transfer data to the device
+    thrust::device_vector<int> d_data = h_data;
+
+    // Measure serial merge sort performance
+    auto start_serial = std::chrono::high_resolution_clock::now();
+    thrust::sort(h_data.begin(), h_data.end());
+    auto end_serial = std::chrono::high_resolution_clock::now();
+
+    std::cout << "Serial Merge Sort took " << std::chrono::duration_cast<std::chrono::milliseconds>(end_serial - start_serial).count() << " milliseconds." << std::endl;
+
+    // Measure parallel merge sort performance
+    auto start_parallel = std::chrono::high_resolution_clock::now();
+    mergeSort(d_data);
+    auto end_parallel = std::chrono::high_resolution_clock::now();
+
+    std::cout << "Parallel Merge Sort took " << std::chrono::duration_cast<std::chrono::milliseconds>(end_parallel - start_parallel).count() << " milliseconds." << std::endl;
+
+    return 0;
+}
+
+
+!nvcc mergenew.cu -o mergenew
+!./mergenew
